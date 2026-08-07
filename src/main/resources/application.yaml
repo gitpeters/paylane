@@ -53,3 +53,10 @@ paylane:
     # One merchant holds ~40% of all transactions (a realistic "whale" tenant).
     whale-share: 0.40
     currency: NGN
+  provider:
+    stub:
+      # How long the stub holds a charge open, and how often it declines.
+      # Set delay-ms=30000 to reproduce a client timeout against a call that
+      # still succeeds server-side. There is no timeout on the caller by design.
+      delay-ms: 0
+      failure-rate: 0.0
