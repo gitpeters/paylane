@@ -1,0 +1,55 @@
+# Paylane local observability stack
+#   docker compose -f docker-compose.observability.yml up -d
+#
+# Assumes Postgres and the Spring app run on the HOST (IntelliJ), not in Docker.
+# Grafana  -> http://localhost:3000  (admin / admin)
+# Prometheus -> http://localhost:9090
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: paylane-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # keep 30 days so a post-19 trace/metric story can look backwards
+      - --storage.tsdb.retention.time=30d
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # required on Linux
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: paylane-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: dark          # matches the Darcula screenshots
+      GF_AUTH_ANONYMOUS_ENABLED: "true"     # no login screen in screenshots
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    depends_on:
+      - prometheus
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:latest
+    container_name: paylane-pg-exporter
+    ports:
+      - "9187:9187"
+    environment:
+      DATA_SOURCE_NAME: "postgresql://paylane:paylane@host.docker.internal:5432/paylane?sslmode=disable"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  prometheus-data:
+  grafana-data:

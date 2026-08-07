@@ -1,0 +1,45 @@
+spring:
+  application:
+    name: paylane
+
+  # Local credentials come from .env (gitignored), parsed as a properties file.
+  # In prod the same PAYLANE_DB_* keys are supplied as real environment variables.
+  config:
+    import: optional:file:.env[.properties]
+
+  datasource:
+    url: ${PAYLANE_DB_URL}
+    username: ${PAYLANE_DB_USERNAME}
+    password: ${PAYLANE_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+
+  threads:
+    virtual:
+      # Deliberately off. Virtual threads are a later topic; the naive baseline
+      # runs on the platform-thread pool so its limits are visible.
+      enabled: false
+
+  flyway:
+    enabled: true
+    # Default location: classpath:db/migration
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema. Hibernate only validates that the entities
+      # match it — it never mutates DDL. See docs/conventions.md.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+# Seed generator (active only under the `seed` profile). All money in minor units.
+paylane:
+  seed:
+    transaction-count: 4000000
+    merchant-count: 500
+    # One merchant holds ~40% of all transactions (a realistic "whale" tenant).
+    whale-share: 0.40
+    currency: NGN
