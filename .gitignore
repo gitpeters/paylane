@@ -4,12 +4,13 @@ target/
 ### Secrets — local only, never commit ###
 .env
 
+### Agent config — local only, not committed ###
 .claude
-
 CLAUDE.md
 
-### Analysis output ###
+### Analysis / capacity-run output (machine-specific run artifacts) ###
 analysis/*.out
+analysis/out/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/

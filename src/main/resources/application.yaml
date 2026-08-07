@@ -1,3 +1,8 @@
+server:
+  port: ${SERVER_PORT:8082}
+  compression:
+    enabled: true
+
 spring:
   application:
     name: paylane
@@ -13,6 +18,11 @@ spring:
     password: ${PAYLANE_DB_PASSWORD}
     hikari:
       maximum-pool-size: 10
+
+  management:
+    endpoints.web.exposure.include: health,info,metrics,prometheus
+    metrics.tags.application: paylane
+    observations.annotations.enabled: true
 
   threads:
     virtual:
