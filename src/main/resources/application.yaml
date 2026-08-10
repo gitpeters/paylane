@@ -60,3 +60,7 @@ paylane:
       # still succeeds server-side. There is no timeout on the caller by design.
       delay-ms: 0
       failure-rate: 0.0
+  idempotency:
+    # How often expired idempotency keys are purged. Single instance only for now —
+    # distributed scheduling (a lock) is a later topic.
+    cleanup-interval-ms: 3600000

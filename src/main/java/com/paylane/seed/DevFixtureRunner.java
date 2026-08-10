@@ -48,6 +48,8 @@ public class DevFixtureRunner implements CommandLineRunner {
         jdbc.update("DELETE FROM transactions WHERE merchant_id = ?", DEV_MERCHANT_ID);
         jdbc.update("DELETE FROM accounts WHERE merchant_id = ?", DEV_MERCHANT_ID);
         jdbc.update("DELETE FROM api_keys WHERE merchant_id = ?", DEV_MERCHANT_ID);
+        jdbc.update("DELETE FROM idempotency_keys WHERE merchant_id = ?",
+                DEV_MERCHANT_ID);
         jdbc.update("DELETE FROM merchants WHERE id = ?", DEV_MERCHANT_ID);
 
         jdbc.update("INSERT INTO merchants (id, name, status)"
