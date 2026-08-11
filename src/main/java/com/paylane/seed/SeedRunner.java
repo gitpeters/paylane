@@ -29,7 +29,9 @@ import org.springframework.stereotype.Component;
  *       literal because {@code gen_random_uuid()} ignores {@code setseed()}.</li>
  *   <li>Status is ~90% SUCCESS / ~7% FAILED / ~3% PENDING, in one {@code random()} draw.</li>
  *   <li>Every transaction gets 1..2 attempts (~15% retry after a failed first try).</li>
- *   <li>Every SUCCESS transaction gets a balanced DEBIT/CREDIT ledger pair.</li>
+ *   <li>Every SUCCESS transaction gets a balanced pair: DEBIT PROVIDER_SETTLEMENT (system),
+ *       CREDIT MERCHANT_AVAILABLE (the merchant) — two different accounts.</li>
+ *   <li>Balance caches are set to each account's ledger net, so invariant (c) holds.</li>
  * </ul>
  *
  * <p>Parallel workers are disabled for the session — for stable {@code random()} ordering and to
@@ -68,13 +70,38 @@ public class SeedRunner implements CommandLineRunner {
             ) a
             """;
 
+    // Real double-entry: DEBIT the system PROVIDER_SETTLEMENT account, CREDIT the merchant's
+    // MERCHANT_AVAILABLE account. Two rows per SUCCESS transaction, on two DIFFERENT accounts.
     private static final String LEDGER_SQL = """
             INSERT INTO ledger_entries (transaction_id, account_id, direction, amount, currency, created_at)
-            SELECT t.id, acc.id, d.direction, t.amount, t.currency, t.created_at
+            SELECT t.id, ps.id, 'DEBIT', t.amount, t.currency, t.created_at
             FROM transactions t
-            JOIN accounts acc ON acc.merchant_id = t.merchant_id AND acc.currency = t.currency
-            CROSS JOIN (VALUES ('DEBIT'), ('CREDIT')) AS d(direction)
+            JOIN accounts ps ON ps.merchant_id IS NULL
+                            AND ps.account_type = 'PROVIDER_SETTLEMENT'
+                            AND ps.currency = t.currency
             WHERE t.status = 'SUCCESS'
+            UNION ALL
+            SELECT t.id, ma.id, 'CREDIT', t.amount, t.currency, t.created_at
+            FROM transactions t
+            JOIN accounts ma ON ma.merchant_id = t.merchant_id
+                            AND ma.account_type = 'MERCHANT_AVAILABLE'
+                            AND ma.currency = t.currency
+            WHERE t.status = 'SUCCESS'
+            """;
+
+    // Balance caches = each account's ledger net (CREDIT − DEBIT), so invariant (c) holds on the
+    // fresh seed. One GROUP BY scan + join, NOT a per-account correlated subquery (which would be
+    // ~500 full scans at 4M rows). Accounts with no entries keep their seeded 0 = their empty sum.
+    private static final String BALANCES_SQL = """
+            UPDATE accounts a
+            SET balance = s.net, updated_at = now()
+            FROM (
+                SELECT account_id,
+                       SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount END) AS net
+                FROM ledger_entries
+                GROUP BY account_id
+            ) s
+            WHERE s.account_id = a.id
             """;
 
     private final JdbcTemplate jdbc;
@@ -159,12 +186,19 @@ public class SeedRunner implements CommandLineRunner {
                 INSERT INTO api_keys (merchant_id, key_hash, created_at)
                 SELECT id, md5(random()::text || id::text), now() FROM merchants""");
         sql.add("""
-                INSERT INTO accounts (merchant_id, currency, balance, created_at, updated_at)
-                SELECT id, '%s', 0, now(), now() FROM merchants""".formatted(currency));
+                INSERT INTO accounts (merchant_id, account_type, currency, balance, created_at, updated_at)
+                SELECT id, 'MERCHANT_AVAILABLE', '%s', 0, now(), now() FROM merchants""".formatted(currency));
+        // System-owned accounts (no merchant): one PROVIDER_SETTLEMENT + one FEES_REVENUE per currency.
+        sql.add("""
+                INSERT INTO accounts (merchant_id, account_type, currency, balance, created_at, updated_at)
+                SELECT NULL, t.account_type, '%s', 0, now(), now()
+                FROM (VALUES ('PROVIDER_SETTLEMENT'), ('FEES_REVENUE')) AS t(account_type)"""
+                .formatted(currency));
 
         sql.add(transactionsSql(count, others, currency, whaleShare));
         sql.add(ATTEMPTS_SQL);
         sql.add(LEDGER_SQL);
+        sql.add(BALANCES_SQL);
 
         for (final String table : SEEDED_TABLES) {
             sql.add("VACUUM ANALYZE " + table);

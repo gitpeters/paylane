@@ -83,8 +83,13 @@ FROM generate_series(1, 499) AS g;
 INSERT INTO api_keys (merchant_id, key_hash, created_at)
 SELECT id, md5(random()::text || id::text), now() FROM merchants;
 
-INSERT INTO accounts (merchant_id, currency, balance, created_at, updated_at)
-SELECT id, 'NGN', 0, now(), now() FROM merchants;
+INSERT INTO accounts (merchant_id, account_type, currency, balance, created_at, updated_at)
+SELECT id, 'MERCHANT_AVAILABLE', 'NGN', 0, now(), now() FROM merchants;
+
+-- System-owned accounts (no merchant): one PROVIDER_SETTLEMENT + one FEES_REVENUE per currency.
+INSERT INTO accounts (merchant_id, account_type, currency, balance, created_at, updated_at)
+SELECT NULL, t.account_type, 'NGN', 0, now(), now()
+FROM (VALUES ('PROVIDER_SETTLEMENT'), ('FEES_REVENUE')) AS t(account_type);
 
 -- Transactions: the whale (~40%) is ids[1], the earliest-created merchant; the rest decay
 -- via power(random(),2). Merchant assignment is an array subscript, not a join, so random()
@@ -123,14 +128,34 @@ CROSS JOIN LATERAL (
     FROM generate_series(1, CASE WHEN (t.h % 100) < 15 THEN 2 ELSE 1 END) AS gs
 ) a;
 
--- Only SUCCESS transactions get ledger entries: a balanced DEBIT/CREDIT pair, same amount and
--- currency, against the merchant's account.
+-- Only SUCCESS transactions get ledger entries. Real double-entry: DEBIT the system
+-- PROVIDER_SETTLEMENT account, CREDIT the merchant's MERCHANT_AVAILABLE account — two accounts.
 INSERT INTO ledger_entries (transaction_id, account_id, direction, amount, currency, created_at)
-SELECT t.id, acc.id, d.direction, t.amount, t.currency, t.created_at
+SELECT t.id, ps.id, 'DEBIT', t.amount, t.currency, t.created_at
 FROM transactions t
-JOIN accounts acc ON acc.merchant_id = t.merchant_id AND acc.currency = t.currency
-CROSS JOIN (VALUES ('DEBIT'), ('CREDIT')) AS d(direction)
+JOIN accounts ps ON ps.merchant_id IS NULL AND ps.account_type = 'PROVIDER_SETTLEMENT'
+                AND ps.currency = t.currency
+WHERE t.status = 'SUCCESS'
+UNION ALL
+SELECT t.id, ma.id, 'CREDIT', t.amount, t.currency, t.created_at
+FROM transactions t
+JOIN accounts ma ON ma.merchant_id = t.merchant_id AND ma.account_type = 'MERCHANT_AVAILABLE'
+                AND ma.currency = t.currency
 WHERE t.status = 'SUCCESS';
+
+-- Balance caches = each account's ledger net (CREDIT − DEBIT), so invariant (c) holds on the
+-- fresh seed: accounts.balance equals the signed sum of that account's entries. One GROUP BY
+-- scan + join (NOT a per-account correlated subquery, which would be ~500 full scans at 4M rows).
+-- Accounts with no entries keep their seeded balance 0, which already equals their (empty) sum.
+UPDATE accounts a
+SET balance = s.net, updated_at = now()
+FROM (
+    SELECT account_id,
+           SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount END) AS net
+    FROM ledger_entries
+    GROUP BY account_id
+) s
+WHERE s.account_id = a.id;
 
 -- (c) refresh planner stats. An EXPLAIN on stale stats measures the wrong thing.
 VACUUM ANALYZE merchants;

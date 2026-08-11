@@ -1,6 +1,7 @@
 package com.paylane.charge;
 
 import com.paylane.common.ApiKeyHasher;
+import com.paylane.ledger.LedgerService;
 import com.paylane.provider.ProviderClient;
 import com.paylane.provider.ProviderResult;
 import java.util.UUID;
@@ -12,10 +13,12 @@ public class ChargeService {
 
     private final JdbcTemplate db;
     private final ProviderClient provider;
+    private final LedgerService ledger;
 
-    public ChargeService(JdbcTemplate db, ProviderClient provider) {
+    public ChargeService(JdbcTemplate db, ProviderClient provider, LedgerService ledger) {
         this.db = db;
         this.provider = provider;
+        this.ledger = ledger;
     }
 
     public ChargeResponse charge(String apiKey, ChargeRequest req) {
@@ -36,28 +39,14 @@ public class ChargeService {
                 VALUES (?, 'stub', ?, ?)
                 """, txId, result.status(), result.latencyMs());
         if (result.status().equals("SUCCESS")) {
-            creditMerchant(merchantId, txId, req);
+            // Real double-entry: DEBIT PROVIDER_SETTLEMENT, CREDIT MERCHANT_AVAILABLE, both
+            // balance caches updated atomically. See LedgerService.
+            ledger.recordSuccessfulCharge(merchantId, txId, req.amount(), req.currency());
         }
         db.update("""
                 UPDATE transactions SET status = ? WHERE id = ?
                 """, result.status(), txId);
         return new ChargeResponse(txId.toString(), req.merchantReference(),
                 req.amount(), req.currency(), result.status());
-    }
-
-    private void creditMerchant(UUID merchantId, UUID txId, ChargeRequest req) {
-        db.update("""
-                INSERT INTO ledger_entries
-                    (transaction_id, account_id, direction, amount, currency)
-                SELECT ?, a.id, d.direction, ?, ?
-                FROM accounts a
-                CROSS JOIN (VALUES ('DEBIT'), ('CREDIT')) AS d(direction)
-                WHERE a.merchant_id = ? AND a.currency = ?
-                """, txId, req.amount(), req.currency(), merchantId,
-                req.currency());
-        db.update("""
-                UPDATE accounts SET balance = balance + ?
-                WHERE merchant_id = ? AND currency = ?
-                """, req.amount(), merchantId, req.currency());
     }
 }

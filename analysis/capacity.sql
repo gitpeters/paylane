@@ -76,7 +76,15 @@ WHERE s.relname IN ('merchants', 'api_keys', 'accounts',
                     'transactions', 'transaction_attempts', 'ledger_entries')
 ORDER BY bytes_per_row DESC NULLS LAST;
 
-\echo '== 6. Post-seed invariants (self-check, every row must PASS) =='
+\echo '== 6. Invariants (self-check): OLD checks always PASS; NEW checks (a,b,c) CAN fail =='
+-- The OLD checks (1-4) are the naive ledger's own self-checks. They pass even on a fake ledger
+-- whose two legs share one account, because they only test count/balance in aggregate. The NEW
+-- checks (a,b,c) are the ones that a real double-entry ledger must satisfy and a naive one cannot:
+--   a) every posting nets to zero AND touches >= 2 distinct accounts (real double-entry);
+--   b) the whole ledger nets to zero;
+--   c) each account's cached balance equals its ledger net (cache = truth; drift is a bug).
+-- Note: none of these reference accounts.account_type, so this section also runs on the pre-V3
+-- schema (the naive baseline) unchanged.
 WITH success AS (SELECT count(*) AS n FROM transactions WHERE status = 'SUCCESS'),
      led AS (SELECT count(*) AS n FROM ledger_entries),
      bad_pair AS (
@@ -98,24 +106,64 @@ WITH success AS (SELECT count(*) AS n FROM transactions WHERE status = 'SUCCESS'
          FROM ledger_entries le
          JOIN transactions t ON t.id = le.transaction_id
          WHERE t.status <> 'SUCCESS'
+     ),
+     -- NEW (a): a real posting nets to 0 AND spans >= 2 distinct accounts. Same-account pairs
+     -- net to 0 but touch ONE account, so the naive ledger fails this on every transaction.
+     new_a AS (
+         SELECT count(*) AS n FROM (
+             SELECT transaction_id
+             FROM ledger_entries
+             GROUP BY transaction_id
+             HAVING sum(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount END) <> 0
+                 OR count(DISTINCT account_id) < 2
+         ) x
+     ),
+     -- NEW (b): the whole ledger nets to 0.
+     new_b AS (
+         SELECT coalesce(sum(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount END), 0) AS s
+         FROM ledger_entries
+     ),
+     -- NEW (c): each account's cached balance equals the signed sum of its entries. This is the
+     -- cache-vs-truth check; an off-ledger balance write (or a fake ledger) makes it fail.
+     new_c AS (
+         SELECT count(*) AS n FROM (
+             SELECT a.id
+             FROM accounts a
+             LEFT JOIN ledger_entries le ON le.account_id = a.id
+             GROUP BY a.id, a.balance
+             HAVING a.balance <> coalesce(
+                 sum(CASE WHEN le.direction = 'CREDIT' THEN le.amount ELSE -le.amount END), 0)
+         ) x
      )
 SELECT ord, check_name, detail, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result
 FROM (
-    SELECT 1 AS ord, 'ledger_entries = 2 x SUCCESS'            AS check_name,
+    SELECT 1 AS ord, 'OLD 1: ledger_entries = 2 x SUCCESS'    AS check_name,
            format('ledger=%s, 2*success=%s', led.n, 2 * success.n) AS detail,
            led.n = 2 * success.n                                   AS ok
     FROM led, success
     UNION ALL
-    SELECT 2, 'each txn: exactly 1 DEBIT + 1 CREDIT',
+    SELECT 2, 'OLD 2: each txn 1 DEBIT + 1 CREDIT',
            format('violating txns=%s', bad_pair.n), bad_pair.n = 0
     FROM bad_pair
     UNION ALL
-    SELECT 3, 'sum(DEBIT) = sum(CREDIT)',
+    SELECT 3, 'OLD 3: sum(DEBIT) = sum(CREDIT)',
            format('debit=%s, credit=%s', sums.d, sums.c), sums.d = sums.c
     FROM sums
     UNION ALL
-    SELECT 4, 'no ledger rows for FAILED/PENDING',
+    SELECT 4, 'OLD 4: no ledger rows for FAILED/PENDING',
            format('orphan rows=%s', orphan.n), orphan.n = 0
     FROM orphan
+    UNION ALL
+    SELECT 5, 'NEW a: per txn nets 0 AND >= 2 distinct accounts',
+           format('non-conforming txns=%s', new_a.n), new_a.n = 0
+    FROM new_a
+    UNION ALL
+    SELECT 6, 'NEW b: whole ledger nets to 0',
+           format('system net=%s', new_b.s), new_b.s = 0
+    FROM new_b
+    UNION ALL
+    SELECT 7, 'NEW c: accounts.balance = ledger net (cache=truth)',
+           format('drifted accounts=%s', new_c.n), new_c.n = 0
+    FROM new_c
 ) checks
 ORDER BY ord;

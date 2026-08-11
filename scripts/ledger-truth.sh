@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 #
-# scripts/ledger-truth.sh — capture the before-state for the "ledger is not the truth" post.
+# scripts/ledger-truth.sh — capture the ledger-vs-balance truth for the "ledger is the truth" post.
 #
-# The naive charge path posts BOTH legs of every double-entry pair against the SAME account
-# (the merchant's own), and mutates accounts.balance separately. Two consequences fall out of
-# that, and this script makes both visible against a live Postgres:
+# Runs the SAME steps against whichever code/schema is checked out, so the before (naive) and
+# after (real double-entry) captures compare directly:
 #
-#   1. Summing the ledger for that account (CREDIT − DEBIT) always nets to ZERO — the pairs
-#      cancel — so the balance can never be reconstructed from the ledger.
-#   2. A correction written straight to accounts.balance leaves no ledger row at all, so there
-#      is literally no entry that explains why the balance moved.
+#   1. reset the dev merchant  2. three charges  3. list the ledger legs  4. an off-ledger
+#   balance correction + balance-vs-ledger side-by-side  5. the capacity.sql invariants
+#   6. reconcile the cached balance against the ledger ("which entry explains the difference?").
+#
+# What the two captures show:
+#   before: both legs of every pair land on ONE account, so the ledger nets to 0 and cannot
+#           reconstruct the balance; step 6 returns nothing — no entry explains the difference.
+#   after:  the legs land on DIFFERENT accounts, so the ledger net is the real credited amount;
+#           step 6 returns the discrepancy — exactly the off-ledger correction (check c).
+#
+# Usage: ./scripts/ledger-truth.sh [out-basename]   # default: ledger-before ; after: ledger-after
 #
 # It boots the app on its own port (dev profile, provider delay-ms=0 so every charge succeeds
-# instantly), runs three real charges through POST /v1/charges, applies a manual balance
-# correction, and prints the ledger vs balance divergence. The existing capacity.sql section-6
-# invariants are run too — they all PASS, which is the point: the self-checks are green and the
-# ledger is still useless as a source of truth.
-#
-# Evidence is written to analysis/out/ledger-before.txt and echoed to the terminal. Nothing here
-# changes the schema or the ledger code — this is a pure capture of the current behaviour.
+# instantly). Evidence is written to analysis/out/<out-basename>.txt and echoed to the terminal.
 set -euo pipefail
 
 # --- config -----------------------------------------------------------------
@@ -48,8 +48,10 @@ export PGDATABASE="${PGDATABASE:-paylane}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"   # so the app finds .env (spring.config.import is relative to CWD)
 OUT_DIR="$ROOT/analysis/out"
-OUT_FILE="$OUT_DIR/ledger-before.txt"
-APP_LOG="$OUT_DIR/ledger-truth.app.log"
+OUT_NAME="${1:-ledger-before}"          # evidence basename: ledger-before | ledger-after
+PHASE="${OUT_NAME#ledger-}"             # "before" | "after" — labels the header only
+OUT_FILE="$OUT_DIR/${OUT_NAME}.txt"
+APP_LOG="$OUT_DIR/${OUT_NAME}.app.log"
 CAPACITY_SQL="$ROOT/analysis/capacity.sql"
 JAR="$ROOT/target/paylane-0.0.1-SNAPSHOT.jar"
 BASE_URL="http://localhost:${PORT}/v1/charges"
@@ -102,14 +104,20 @@ fire_charge() {
 }
 
 # --- (1) reset the dev merchant --------------------------------------------
-# balance -> 0, and drop any prior 'ledger-demo%' transactions (children first for the FKs) so
-# the run is repeatable and the balances below are directly comparable across runs.
+# balance -> 0, and drop any prior 'ledger-demo%' transactions so the run is repeatable and the
+# balances below are directly comparable. session_replication_role='replica' bypasses the V3
+# immutability trigger for this dev-only reset (and FK triggers, so child-first order is not
+# required); it is a harmless no-op on the pre-V3 schema. The dev fixture has usually wiped these
+# rows already at boot, so the deletes typically match nothing.
 echo ">> resetting dev merchant: balance -> 0, deleting prior '${REFERENCE_PREFIX}%' transactions"
-psql -q \
-    -c "DELETE FROM ledger_entries       WHERE transaction_id IN (SELECT id FROM transactions WHERE reference LIKE '${REFERENCE_PREFIX}%')" \
-    -c "DELETE FROM transaction_attempts WHERE transaction_id IN (SELECT id FROM transactions WHERE reference LIKE '${REFERENCE_PREFIX}%')" \
-    -c "DELETE FROM transactions         WHERE reference LIKE '${REFERENCE_PREFIX}%'" \
-    -c "UPDATE accounts SET balance = 0 WHERE merchant_id = '$DEV_MERCHANT_ID'::uuid AND currency = 'NGN'"
+psql -q -c "
+SET session_replication_role = 'replica';
+DELETE FROM ledger_entries       WHERE transaction_id IN (SELECT id FROM transactions WHERE reference LIKE '${REFERENCE_PREFIX}%');
+DELETE FROM transaction_attempts WHERE transaction_id IN (SELECT id FROM transactions WHERE reference LIKE '${REFERENCE_PREFIX}%');
+DELETE FROM transactions         WHERE reference LIKE '${REFERENCE_PREFIX}%';
+UPDATE accounts SET balance = 0 WHERE merchant_id = '$DEV_MERCHANT_ID'::uuid AND currency = 'NGN';
+SET session_replication_role = 'origin';
+"
 BALANCE_RESET="$(balance_of)"
 
 # --- (2) three successful charges, balance printed after each ---------------
@@ -138,12 +146,12 @@ PGVER="$(psql -tAq -c 'SHOW server_version')"
 
 # --- assemble the evidence file --------------------------------------------
 {
-    echo "# ledger truth (before) | $TS | postgres=$PGVER | delay-ms=$DELAY_MS"
+    echo "# ledger-truth ($PHASE) | $TS | postgres=$PGVER | delay-ms=$DELAY_MS"
     echo "# dev merchant=$DEV_MERCHANT_ID currency=NGN | charge amount=$AMOUNT | correction=-$CORRECTION"
     echo "#"
-    echo "# The naive charge path posts BOTH legs of every pair against the SAME account and"
-    echo "# mutates accounts.balance separately. The ledger for that account therefore nets to 0"
-    echo "# and cannot reconstruct the balance; a direct balance correction leaves no ledger row."
+    echo "# Three charges then one off-ledger balance correction, then reconcile accounts.balance"
+    echo "# against the ledger. before (naive): both legs on ONE account -> ledger nets to 0."
+    echo "# after (real): legs on DIFFERENT accounts -> ledger net is the true credited amount."
     echo
 
     echo "== 1. reset: balance -> 0, prior '${REFERENCE_PREFIX}%' transactions deleted =="
@@ -155,7 +163,7 @@ PGVER="$(psql -tAq -c 'SHOW server_version')"
     echo
 
     echo "== 3. ledger_entries for those three transactions =="
-    echo "-- the point: both legs of every pair carry the SAME account_id"
+    echo "-- before: both legs share ONE account_id; after: DEBIT and CREDIT land on DIFFERENT accounts"
     psql -c "SELECT le.transaction_id, le.account_id, le.direction, le.amount \
              FROM ledger_entries le \
              JOIN transactions t ON t.id = le.transaction_id \
@@ -177,28 +185,31 @@ PGVER="$(psql -tAq -c 'SHOW server_version')"
              GROUP BY a.id, a.balance"
     echo
 
-    echo "== 5. section-6 invariants (from analysis/capacity.sql §6) — every row PASSes =="
+    echo "== 5. invariants (from analysis/capacity.sql §6) — OLD checks PASS, NEW (a,b,c) can fail =="
     # Run the existing capacity.sql and keep only its section 6. tail -n +2 drops capacity.sql's
     # own "== 6. ..." echo line so the numbering here stays 1..6 with no duplicate header.
     psql -v whale_id="$WHALE_ID" -f "$CAPACITY_SQL" 2>/dev/null | sed -n '/== 6\./,$p' | tail -n +2
     echo
 
-    echo "== 6. \"which entry explains the difference?\" =="
-    echo "-- The ledger nets to 0 for this account; the balance is not 0. If the ledger were the"
-    echo "-- source of truth, some posting would move this account's net away from 0 and account"
-    echo "-- for the gap. Look for any entry whose opposite leg is NOT on the same account+txn."
-    echo "-- There is none: both legs of every pair share this one account, and the correction"
-    echo "-- wrote no entry at all. The query returns zero rows."
-    psql -c "SELECT le.id, le.transaction_id, le.direction, le.amount \
-             FROM ledger_entries le \
-             JOIN accounts a ON a.id = le.account_id \
+    echo "== 6. \"which entry explains the difference?\" (reconcile cache vs ledger — check c) =="
+    echo "-- Sum this account's ledger entries and compare to the cached accounts.balance. Only"
+    echo "-- accounts whose ledger net is non-zero are considered — an account a real ledger moved."
+    echo "--   before (naive): both legs share one account, net = 0 -> no account qualifies ->"
+    echo "--                    zero rows. The ledger cannot explain the balance; nothing to find."
+    echo "--   after  (real):  net = the true credited amount; the row shows the gap between the"
+    echo "--                    cache and the truth = exactly the off-ledger manual correction."
+    psql -c "SELECT a.id AS account_id, a.balance AS cached_balance, s.ledger_truth, \
+                    a.balance - s.ledger_truth AS discrepancy \
+             FROM accounts a \
+             JOIN ( \
+                   SELECT le.account_id, \
+                          SUM(CASE WHEN le.direction = 'CREDIT' THEN le.amount ELSE -le.amount END) AS ledger_truth \
+                   FROM ledger_entries le \
+                   GROUP BY le.account_id \
+                   HAVING SUM(CASE WHEN le.direction = 'CREDIT' THEN le.amount ELSE -le.amount END) <> 0 \
+             ) s ON s.account_id = a.id \
              WHERE a.merchant_id = '$DEV_MERCHANT_ID'::uuid AND a.currency = 'NGN' \
-               AND NOT EXISTS ( \
-                     SELECT 1 FROM ledger_entries opp \
-                     WHERE opp.transaction_id = le.transaction_id \
-                       AND opp.account_id     = le.account_id \
-                       AND opp.direction      = CASE le.direction WHEN 'DEBIT' THEN 'CREDIT' ELSE 'DEBIT' END \
-                       AND opp.amount         = le.amount)"
+               AND a.balance <> s.ledger_truth"
 } > "$OUT_FILE"
 
 echo
