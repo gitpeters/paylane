@@ -22,7 +22,7 @@ stub for illustration.
 
 ## 📚 The posts
 
-The series runs on LinkedIn as visual carousels by **Peter Abraham** (Backend Engineer). Click any cover
+The series runs on LinkedIn as visual carousels. Click any cover
 to open the full slide deck — the PDFs live in [`posts/`](posts/):
 
 <table>
