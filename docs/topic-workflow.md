@@ -36,7 +36,8 @@ Produce:
   "just in case" checks, no warning comments.
 - It must compile, pass a happy-path test, and be something you'd sign off on in review if
   you weren't looking for this specific flaw.
-- Commit it on a branch: `topic/<nn>-<slug>/before`.
+- Commit the naive version on `master` (message `post-<nn>: … (before-state)`); it gets the
+  `post-<nn>-before` tag at GATE 2. See **Git & references** below.
 
 Report: what you built, and one line confirming you did not add the missing safeguard.
 
@@ -72,7 +73,8 @@ reproduction is wrong or the naive version is accidentally safe, and both are in
   possible. If the fix exceeds ~40 lines, propose splitting the topic.
 - The Phase 2 test now passes **without being modified.** If you changed the test to make it
   pass, you didn't fix anything — flag it.
-- Branch: `topic/<nn>-<slug>/after`.
+- Commit the fix (message `post-<nn>: … (the fix)`); it gets the `post-<nn>-after` tag at this
+  gate. See **Git & references** below.
 - Quantify the cost: run the benchmark, measure the write slowdown, count the extra rows.
   If you can't measure it, say "not measured" rather than estimating.
 
@@ -114,13 +116,36 @@ candidate for a future topic — don't fix scope-creep findings now, record them
 
 ---
 
+## Git & references (branch per post)
+
+The trunk is `master`, and the build order is the post order. Each topic leaves permanent,
+easy-to-find references so any post can be located and diffed later:
+
+- **`post-<nn>` branch** — pinned to the tip of that topic (e.g. `post-04`). It stays frozen there
+  as the reference for the post; `master` moves on ahead of it. Create it at the topic's start, or
+  at the latest when the topic closes.
+- **`post-<nn>-before` tag** — the naive version, tagged at **GATE 2** (evidence captured, nothing
+  fixed yet).
+- **`post-<nn>-after` tag** — the fix, tagged at **GATE 3**.
+- **Commit messages** read `post-<nn>: … (before-state)` and `post-<nn>: … (the fix)`. **Never**
+  add a `Co-Authored-By: Claude` trailer — commits are the author's alone.
+- The `before` tag/commit is **never rewritten or deleted** — the post depends on it existing.
+- General docs (README, this file, etc.) land on `master` on top of the latest post; they are not
+  tied to any `post-<nn>` branch.
+- Push only when the author asks. `master` fast-forwards; a force-push needs explicit approval.
+
+So far: branches `post-01`…`post-04`; tags `post-03-before/after`, `post-04-before/after`.
+
+---
+
 ## Rules that apply across all phases
 
 - **Never skip a phase, never merge two.** Especially not 1 and 3 — building the fix while
   building the naive version is the single most common way this workflow fails.
 - **Never fix a flaw you notice in passing.** If you spot a bug from a future topic, note it
   in `NOTES.md` under "spotted early" and leave it alone. That bug is a future post.
-- **Branches:** `topic/<nn>-<slug>/before` → `/after` → merge to `main`. The `before` branch
-  is never deleted; the post depends on it existing.
+- **Git & references:** one `post-<nn>` branch per topic, plus `post-<nn>-before` / `post-<nn>-after`
+  tags on `master` (see the section above). The `before` tag is never rewritten or deleted — the
+  post depends on it existing.
 - **If we're mid-topic and I ask for something unrelated,** say which phase we're parked at
   before switching, so we can resume cleanly.
