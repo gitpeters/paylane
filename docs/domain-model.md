@@ -15,11 +15,22 @@ is the main way a 24-topic series dies.
 · `last_used_at` · `revoked_at`
 
 ### `account`
-`id` · `merchant_id` · `currency` · `available_minor` · `pending_minor` · `reserved_minor` · `version`
+`id` · `merchant_id` (nullable = system-owned) · `account_type` · `currency` · `available_minor`
+· `pending_minor` · `reserved_minor` · `version`
+
+`account_type` is one of:
+
+- `MERCHANT_AVAILABLE` — a merchant's own balance. One per merchant per currency; `merchant_id` set.
+- `PROVIDER_SETTLEMENT` — system-owned (`merchant_id` NULL). The counterparty a charge debits.
+- `FEES_REVENUE` — system-owned (`merchant_id` NULL). Where processing fees are booked.
+
+> A charge is real double-entry across **two** accounts: DEBIT `PROVIDER_SETTLEMENT`, CREDIT
+> `MERCHANT_AVAILABLE` — never both legs on one account. Introduced in topic 04.
 
 > The balance columns are a **derived cache**, not the source of truth. The ledger is the
 > truth. Topic 04 builds the naive version where these columns *are* the truth, then shows
-> why that's unrecoverable.
+> why that's unrecoverable — and then makes the ledger the truth, with the cache kept in the
+> same transaction as the entries.
 
 ### `transaction`
 `id` · `merchant_id` · `reference` (merchant-supplied, unique per merchant) · `amount_minor`
