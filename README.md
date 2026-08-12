@@ -196,5 +196,4 @@ Payment providers are **stubbed** — the code never calls a live provider API. 
 examples are throwaway local-dev values.
 
 ## License
-
-_Not yet licensed._
+[`MIT LICENSE`](https://github.com/gitpeters/paylane#MIT-1-ov-file)
